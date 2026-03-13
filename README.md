@@ -31,6 +31,16 @@ python text_proofreader.py --auto-docx -o report.tsv
 python text_proofreader.py --auto-docx --search-dir "D:/你的目录" -o report.tsv
 ```
 
+如果你上传在 GitHub（而不是当前本地目录），可直接传链接：
+```bash
+python text_proofreader.py --github-url "https://github.com/<owner>/<repo>/blob/<branch>/path/file.docx" -o report.tsv
+```
+
+先列出当前目录可识别的 docx 路径：
+```bash
+python text_proofreader.py --list-docx --search-dir .
+```
+
 输出示例：
 - 终端预览前 30 条问题
 - `report.tsv` 输出所有问题

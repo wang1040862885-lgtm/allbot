@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
 import zipfile
+import tempfile
+from urllib.parse import urlparse
+from urllib.request import urlopen
 from xml.etree import ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,6 +163,43 @@ def find_docx_files(search_dir: Path) -> List[Path]:
 
 
 
+def normalize_input_path(raw_path: str) -> Path:
+    """清理输入路径中的换行和首尾引号。"""
+    cleaned = raw_path.strip().strip('"').strip("'").replace("\r", "").replace("\n", "")
+    return Path(cleaned)
+
+
+def to_github_raw_url(url: str) -> str:
+    """将 GitHub 页面 URL 转成 raw 下载 URL。"""
+    if "raw.githubusercontent.com" in url:
+        return url
+
+    parsed = urlparse(url)
+    if parsed.netloc not in {"github.com", "www.github.com"}:
+        raise ValueError("仅支持 github.com / raw.githubusercontent.com 链接")
+
+    parts = [p for p in parsed.path.split("/") if p]
+    # owner/repo/blob/branch/path/to/file.docx
+    if len(parts) >= 5 and parts[2] == "blob":
+        owner, repo, _, branch, *path_parts = parts
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{'/'.join(path_parts)}"
+
+    raise ValueError("无法识别 GitHub 文件链接，请使用 blob 链接或 raw 链接")
+
+
+def download_github_docx(url: str) -> Path:
+    """下载 GitHub 上的 docx 到临时文件并返回本地路径。"""
+    raw_url = to_github_raw_url(url)
+    with urlopen(raw_url, timeout=30) as resp:
+        data = resp.read()
+
+    fd, tmp_name = tempfile.mkstemp(prefix="docx_scan_", suffix=".docx")
+    Path(tmp_name).write_bytes(data)
+    os.close(fd)
+    return Path(tmp_name)
+
+
+
 def write_report(findings: Iterable[Finding], output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8") as f:
         f.write("category\toriginal\tsuggestion\tstart\tend\tline\tcolumn\tcontext\n")
@@ -273,6 +314,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gui", action="store_true", help="启动图形界面")
     p.add_argument("--auto-docx", action="store_true", help="自动查找当前目录下最近修改的 docx 并扫描")
     p.add_argument("--search-dir", default=".", help="自动查找 docx 时的搜索目录，默认当前目录")
+    p.add_argument("--github-url", help="直接传入 GitHub 上 docx 文件链接（blob 或 raw）")
+    p.add_argument("--list-docx", action="store_true", help="列出搜索目录下检测到的 docx 路径")
     return p
 
 
@@ -284,9 +327,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     file_path: Path | None = None
+    temp_download: Path | None = None
 
-    if args.file:
-        file_path = Path(args.file)
+    if args.list_docx:
+        search_dir = Path(args.search_dir)
+        if not search_dir.exists() or not search_dir.is_dir():
+            print(f"搜索目录无效: {search_dir}", file=sys.stderr)
+            return 2
+        files = find_docx_files(search_dir)
+        if not files:
+            print(f"未找到 docx: {search_dir.resolve()}")
+            return 0
+        print("找到以下 docx 文件：")
+        for idx, path in enumerate(files, 1):
+            print(f"[{idx:02d}] {path}")
+        return 0
+
+    if args.github_url:
+        try:
+            temp_download = download_github_docx(args.github_url)
+        except Exception as exc:
+            print(f"下载 GitHub docx 失败: {exc}", file=sys.stderr)
+            return 2
+        file_path = temp_download
+        print(f"已下载 GitHub docx 到临时文件: {file_path}")
+    elif args.file:
+        file_path = normalize_input_path(args.file)
         if not file_path.exists():
             print(f"文件不存在: {file_path}", file=sys.stderr)
             return 2
@@ -302,11 +368,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         file_path = docx_files[0]
         print(f"自动选择 docx: {file_path}")
     else:
-        print("请指定目标文件路径，或使用 --auto-docx 自动查找，或 --gui 启动图形界面", file=sys.stderr)
+        print("请指定目标文件路径，或使用 --auto-docx 自动查找，或 --github-url 下载并扫描，或 --gui 启动图形界面", file=sys.stderr)
         return 2
 
     output_path = Path(args.output) if args.output else None
-    return run_cli(file_path, output_path)
+    try:
+        return run_cli(file_path, output_path)
+    finally:
+        if temp_download and temp_download.exists():
+            temp_download.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
